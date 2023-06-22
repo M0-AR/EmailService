@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/sendgrid/sendgrid-go"
+	"github.com/sendgrid/sendgrid-go/helpers/mail"
 	"log"
 	"os"
 	"time"
@@ -13,16 +15,15 @@ import (
 type EmailService struct {
 	MailgunPrivateAPIKey string
 	MailgunDomain        string
+	SendGridAPIKey       string
 	SparkPostAPIKey      string
-	AWSAccessKey         string
-	AWSSecretKey         string
-	AWSRegion            string
 }
 
 func main() {
 	emailService := &EmailService{
 		MailgunPrivateAPIKey: os.Getenv("MAILGUN_PRIVATE_API_KEY"),
 		MailgunDomain:        os.Getenv("MAILGUN_DOMAIN"),
+		SendGridAPIKey:       os.Getenv("SENDGRID_API_KEY"),
 	}
 
 	success := emailService.SendEmail("s176492@student.dtu.dk", "Hello", "Testing some Mailgun awesomeness!")
@@ -33,15 +34,12 @@ func main() {
 	}
 }
 
-
-
 func (es *EmailService) SendEmail(to string, subject string, body string) bool {
 	success := es.sendViaMailgun(to, subject, body)
 
-	//if !success {
-	//	success = es.sendViaSparkPost(to, subject, body)
-	//}
-
+	if !success {
+		success = es.sendViaSendGrid(to, subject, body)
+	}
 
 	return success
 }
@@ -65,4 +63,23 @@ func (es *EmailService) sendViaMailgun(to string, subject string, body string) b
 	}
 
 	return true
+}
+
+func (es *EmailService) sendViaSendGrid(to string, subject string, body string) bool {
+	from := mail.NewEmail("Example User", "s176492@student.dtu.dk")
+	toEmail := mail.NewEmail("Recipient", to)
+	message := mail.NewSingleEmail(from, subject, toEmail, body, body)
+	client := sendgrid.NewSendClient(es.SendGridAPIKey)
+	response, err := client.Send(message)
+
+	if err != nil {
+		log.Println("SendGrid:", err)
+		return false
+	}
+
+	fmt.Println("Status Code:", response.StatusCode)
+	fmt.Println("Body:", response.Body)
+	fmt.Println("Headers:", response.Headers)
+
+	return response.StatusCode >= 200 && response.StatusCode < 300 // Check for HTTP success status codes (2xx)
 }
