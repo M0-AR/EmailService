@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/gorilla/mux"
 	"github.com/sendgrid/sendgrid-go"
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -19,6 +22,12 @@ type EmailService struct {
 	SparkPostAPIKey      string
 }
 
+type EmailRequest struct {
+	To      string `json:"to"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
 func main() {
 	emailService := &EmailService{
 		MailgunPrivateAPIKey: os.Getenv("MAILGUN_PRIVATE_API_KEY"),
@@ -26,12 +35,26 @@ func main() {
 		SendGridAPIKey:       os.Getenv("SENDGRID_API_KEY"),
 	}
 
-	success := emailService.SendEmail("s176492@student.dtu.dk", "Hello", "Testing some Mailgun awesomeness!")
-	if success {
-		fmt.Println("Email sent successfully")
-	} else {
-		fmt.Println("Email sending failed")
-	}
+	r := mux.NewRouter()
+	r.HandleFunc("/send-email", func(w http.ResponseWriter, r *http.Request) {
+		var emailRequest EmailRequest
+		if err := json.NewDecoder(r.Body).Decode(&emailRequest); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		success := emailService.SendEmail(emailRequest.To, emailRequest.Subject, emailRequest.Body)
+		if success {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Email sent successfully"))
+		} else {
+			http.Error(w, "Email sending failed", http.StatusInternalServerError)
+		}
+	}).Methods("POST")
+
+	http.Handle("/", r)
+	fmt.Println("Server listening on port 8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func (es *EmailService) SendEmail(to string, subject string, body string) bool {
