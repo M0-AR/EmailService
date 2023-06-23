@@ -3,23 +3,26 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/gorilla/mux"
-	"github.com/sendgrid/sendgrid-go"
-	"github.com/sendgrid/sendgrid-go/helpers/mail"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/mailgun/mailgun-go/v4"
+	"github.com/sendgrid/sendgrid-go"
+	"github.com/sendgrid/sendgrid-go/helpers/mail"
 )
 
+type EmailServiceProvider interface {
+	SendEmail(to, subject, body string) error
+}
+
 type EmailService struct {
-	MailgunPrivateAPIKey string
-	MailgunDomain        string
-	SendGridAPIKey       string
-	SparkPostAPIKey      string
+	providers []EmailServiceProvider
 }
 
 type EmailRequest struct {
@@ -28,12 +31,96 @@ type EmailRequest struct {
 	Body    string `json:"body"`
 }
 
-func main() {
-	emailService := &EmailService{
-		MailgunPrivateAPIKey: os.Getenv("MAILGUN_PRIVATE_API_KEY"),
-		MailgunDomain:        os.Getenv("MAILGUN_DOMAIN"),
-		SendGridAPIKey:       os.Getenv("SENDGRID_API_KEY"),
+func NewEmailService(providers ...EmailServiceProvider) *EmailService {
+	return &EmailService{
+		providers: providers,
 	}
+}
+
+func (es *EmailService) SendEmail(to, subject, body string) error {
+	if !isValidEmail(to) {
+		return errors.New("Invalid email address")
+	}
+
+	for _, provider := range es.providers {
+		err := provider.SendEmail(to, subject, body)
+		if err == nil {
+			return nil // Email sent successfully
+		}
+		log.Printf("Failed to send email using provider: %v", err)
+	}
+
+	// All providers failed, log the email for later retry
+	logEmailToFile(to, subject, body)
+
+	return errors.New("all providers failed to send email")
+}
+
+type MailgunService struct {
+	PrivateKey string
+	Domain     string
+}
+
+func (mg *MailgunService) SendEmail(to, subject, body string) error {
+	mgClient := mailgun.NewMailgun(mg.Domain, mg.PrivateKey)
+	sender := "Excited User <mailgun@sandbox.mailgun.org>"
+	message := mgClient.NewMessage(sender, subject, body, to)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	_, _, err := mgClient.Send(ctx, message)
+	return err
+}
+
+type SendGridService struct {
+	APIKey string
+}
+
+func (sg *SendGridService) SendEmail(to, subject, body string) error {
+	from := mail.NewEmail("Example User", "example@example.com")
+	toEmail := mail.NewEmail("Recipient", to)
+	message := mail.NewSingleEmail(from, subject, toEmail, body, body)
+	client := sendgrid.NewSendClient(sg.APIKey)
+	response, err := client.Send(message)
+
+	if err != nil || (response.StatusCode < 200 || response.StatusCode >= 300) {
+		return errors.New("Failed to send email via SendGrid")
+	}
+	return nil
+}
+
+func isValidEmail(email string) bool {
+	re := regexp.MustCompile(".+@.+\\..+")
+	return re.MatchString(email)
+}
+
+func logEmailToFile(to, subject, body string) {
+	// Opening or creating the log file
+	file, err := os.OpenFile("failed_emails.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Println("Error opening or creating log file:", err)
+		return
+	}
+	defer file.Close()
+
+	// Logging the email details
+	logEntry := fmt.Sprintf("Time: %s, To: %s, Subject: %s, Body: %s\n", time.Now().Format(time.RFC3339), to, subject, body)
+	_, err = file.WriteString(logEntry)
+	if err != nil {
+		log.Println("Error writing to log file:", err)
+	}
+}
+
+func main() {
+	mailgun := &MailgunService{
+		PrivateKey: os.Getenv("MAILGUN_PRIVATE_API_KEY"),
+		Domain:     os.Getenv("MAILGUN_DOMAIN"),
+	}
+	sendGrid := &SendGridService{
+		APIKey: os.Getenv("SENDGRID_API_KEY"),
+	}
+	emailService := NewEmailService(mailgun, sendGrid)
 
 	r := mux.NewRouter()
 	r.HandleFunc("/send-email", func(w http.ResponseWriter, r *http.Request) {
@@ -43,66 +130,16 @@ func main() {
 			return
 		}
 
-		success := emailService.SendEmail(emailRequest.To, emailRequest.Subject, emailRequest.Body)
-		if success {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("Email sent successfully"))
-		} else {
-			http.Error(w, "Email sending failed", http.StatusInternalServerError)
+		err := emailService.SendEmail(emailRequest.To, emailRequest.Subject, emailRequest.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Email sent successfully"))
 	}).Methods("POST")
 
 	http.Handle("/", r)
 	fmt.Println("Server listening on port 8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
-}
-
-func (es *EmailService) SendEmail(to string, subject string, body string) bool {
-	success := es.sendViaMailgun(to, subject, body)
-
-	if !success {
-		success = es.sendViaSendGrid(to, subject, body)
-	}
-
-	return success
-}
-
-func (es *EmailService) sendViaMailgun(to string, subject string, body string) bool {
-	mg := mailgun.NewMailgun(es.MailgunDomain, es.MailgunPrivateAPIKey)
-	sender := "Excited User <mailgun@sandbox24c6d43652a24e1c8737bd3b91d2a958.mailgun.org>"
-	recipient := to
-
-	message := mg.NewMessage(sender, subject, body, recipient)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-	defer cancel()
-
-	resp, _, err := mg.Send(ctx, message)
-
-	fmt.Printf("Response: %s\n", resp)
-	if err != nil {
-		log.Println("Mailgun: ", err)
-		return false
-	}
-
-	return true
-}
-
-func (es *EmailService) sendViaSendGrid(to string, subject string, body string) bool {
-	from := mail.NewEmail("Example User", "s176492@student.dtu.dk")
-	toEmail := mail.NewEmail("Recipient", to)
-	message := mail.NewSingleEmail(from, subject, toEmail, body, body)
-	client := sendgrid.NewSendClient(es.SendGridAPIKey)
-	response, err := client.Send(message)
-
-	if err != nil {
-		log.Println("SendGrid:", err)
-		return false
-	}
-
-	fmt.Println("Status Code:", response.StatusCode)
-	fmt.Println("Body:", response.Body)
-	fmt.Println("Headers:", response.Headers)
-
-	return response.StatusCode >= 200 && response.StatusCode < 300 // Check for HTTP success status codes (2xx)
 }
