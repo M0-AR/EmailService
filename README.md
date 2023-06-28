@@ -1,6 +1,6 @@
 # Email Service
 
-A generic email service built in Golang, using Mailgun as the primary email provider with MailGun and SendGrid as fallback services.
+A generic email service built in Golang, using Mailgun as the primary email provider and SendGrid as fallback services.
 
 ## Approach
 The service is designed to abstract the email sending process. It first tries to send an email via SendGrid. 
